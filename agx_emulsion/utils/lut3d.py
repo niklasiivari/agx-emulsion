@@ -1,5 +1,5 @@
 import numpy as np
-from agx_emulsion.utils.interp_lut3d import apply_lut_cubic
+from agx_emulsion.utils.interp_lut3d import opencl_apply_lut_cubic
 
 def _create_lut3d(function, xmin=0, xmax=1, steps=32):
     x = np.linspace(xmin, xmax, steps, endpoint=True)
@@ -12,7 +12,7 @@ def _create_lut3d(function, xmin=0, xmax=1, steps=32):
 def compute_with_lut(data, function, xmin=0, xmax=1, steps=32):
     lut = _create_lut3d(function, xmin, xmax, steps)
     # lut = np.ascontiguousarray(lut)
-    return apply_lut_cubic(lut, data)
+    return opencl_apply_lut_cubic(lut, data)
 
 def warmup_lut3d():
     L = 32
@@ -32,7 +32,7 @@ def warmup_lut3d():
     image = np.stack((X, Y, 0.5 * np.ones_like(X)), axis=-1)  # double precision
     
     # --- Warm Up the JIT Compiler ---
-    _ = apply_lut_cubic(lut, image)
+    _ = opencl_apply_lut_cubic(lut, image)
 
 if __name__=='__main__':
     import matplotlib.pyplot as plt
@@ -53,7 +53,7 @@ if __name__=='__main__':
     np.random.seed(0)
     data = np.random.uniform(0,1,size=(300,200,3))
     lut = _create_lut3d(mycalculation)
-    data_finterp = apply_lut_cubic(lut, data)
+    data_finterp = opencl_apply_lut_cubic(lut, data)
     error = mycalculation(data)-data_finterp
     print('Max interpolation error:',np.max(error))
     print('Mean interpolation error:',np.mean(np.abs(error)))
