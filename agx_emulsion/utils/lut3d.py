@@ -1,5 +1,7 @@
 import numpy as np
 from agx_emulsion.utils.interp_lut3d import opencl_apply_lut_cubic
+from agx_emulsion.accelerated.opencl_lut3d import opencl_create_lut3d
+from agx_emulsion import config
 
 def _create_lut3d(function, xmin=0, xmax=1, steps=32):
     x = np.linspace(xmin, xmax, steps, endpoint=True)
@@ -10,7 +12,10 @@ def _create_lut3d(function, xmin=0, xmax=1, steps=32):
     return lut
 
 def compute_with_lut(data, function, xmin=0, xmax=1, steps=32):
-    lut = _create_lut3d(function, xmin, xmax, steps)
+    if config.USE_OPENCL_LUT3D:
+        lut = opencl_create_lut3d(function, xmin, xmax, steps)
+    else:
+        lut = _create_lut3d(function, xmin, xmax, steps)
     # lut = np.ascontiguousarray(lut)
     return opencl_apply_lut_cubic(lut, data)
 

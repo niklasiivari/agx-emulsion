@@ -204,6 +204,7 @@ def simulation(input_layer:Image,
                use_opencl_lut_cubic=True,  # new toggle for OpenCL LUT cubic
                use_opencl_blur=True,  # new toggle for OpenCL blur
                use_opencl_resize=True,  # new toggle for OpenCL resample
+               use_opencl_lut3d=True,  # new toggle for OpenCL LUT3D
                )->ImageData:    
     
     config.USE_OPENCL = use_opencl  # update the global flag
@@ -211,6 +212,8 @@ def simulation(input_layer:Image,
     config.USE_OPENCL_LUT_CUBIC = use_opencl_lut_cubic and use_opencl  # update the global flag
     config.USE_OPENCL_BLUR = use_opencl_blur and use_opencl  # update the global flag
     config.USE_OPENCL_RESIZE = use_opencl_resize and use_opencl  # update the global flag
+    config.USE_OPENCL_LUT3D = use_opencl_lut3d and use_opencl  # update the global flag
+
 
     params = photo_params(film_stock.value, print_paper.value)
         

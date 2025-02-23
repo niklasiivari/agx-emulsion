@@ -224,7 +224,10 @@ class AgXPhoto():
 
     def _rescale_to_original(self, scan, preview_resize_factor):
         if preview_resize_factor != 1.0:
-            scan = resize_image(scan, 1.0/preview_resize_factor)
+            if config.USE_OPENCL_RESIZE:
+                scan = resize_image_gpu(scan, 1.0/preview_resize_factor)
+            else:
+                scan = resize_image(scan, 1.0/preview_resize_factor)
         return scan
     
     def _spectral_lut_compute(self, data, spectral_calculation,

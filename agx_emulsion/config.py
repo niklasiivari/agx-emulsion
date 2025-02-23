@@ -15,3 +15,4 @@ USE_OPENCL_CONTRACT = True      # Toggle for OpenCL contract calculations
 USE_OPENCL_BLUR = True          # Toggle for OpenCL blur operations
 USE_OPENCL_LUT_CUBIC = True     # Toggle for OpenCL cubic LUT interpolation
 USE_OPENCL_RESIZE = True    # Toggle for OpenCL linear LUT interpolation
+USE_OPENCL_LUT3D = True         # Toggle for OpenCL 3D LUT interpolation
