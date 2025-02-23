@@ -3,6 +3,8 @@ import copy
 import colour
 from dotmap import DotMap
 from opt_einsum import contract
+from agx_emulsion.utils.conversions import opencl_parallel_contract
+from agx_emulsion import config   # Use dynamic config import instead of static flag
 
 from agx_emulsion.config import ENLARGER_STEPS, STANDARD_OBSERVER_CMFS
 from agx_emulsion.model.emulsion import Film, compute_density_spectral, develop_simple, compute_random_glare_amount
@@ -16,6 +18,12 @@ from agx_emulsion.utils.crop_resize import crop_image, resize_image
 from agx_emulsion.model.illuminants import standard_illuminant
 from agx_emulsion.utils.io import read_neutral_ymc_filter_values
 from agx_emulsion.profiles.io import load_profile
+
+from agx_emulsion.accelerated.opencl_accelerated import (
+        apply_gaussian_blur_gpu,
+        apply_combined_halation_gaussian_gpu, apply_combined_gaussian_unsharp_gpu
+)
+from agx_emulsion.accelerated.opencl_resize import resize_image_gpu
 
 ymc_filters = read_neutral_ymc_filter_values()
 
@@ -168,7 +176,10 @@ class AgXPhoto():
         if self.io.full_image:
             preview_resize_factor = 1.0
         if preview_resize_factor*upscale_factor != 1.0:
-            image  = resize_image(image, preview_resize_factor*upscale_factor)
+            if config.USE_OPENCL_RESIZE:
+                image = resize_image_gpu(image, preview_resize_factor*upscale_factor)
+            else:
+                image = resize_image(image, preview_resize_factor*upscale_factor)
             pixel_size_um /= preview_resize_factor*upscale_factor
         return image, preview_resize_factor, pixel_size_um
     
@@ -177,8 +188,11 @@ class AgXPhoto():
                                     color_space=self.io.input_color_space,
                                     apply_cctf_decoding=self.io.input_cctf_decoding,
                                     use_lut=self.settings.use_camera_lut)
-        raw = apply_gaussian_blur_um(raw, self.camera.lens_blur_um, pixel_size_um)
-        raw = apply_halation_um(raw, self.negative.halation, pixel_size_um)
+        if config.USE_OPENCL_BLUR:
+            raw = apply_combined_halation_gaussian_gpu(raw, self.camera.lens_blur_um, self.negative.halation, pixel_size_um)
+        else:
+            raw = apply_gaussian_blur_um(raw, self.camera.lens_blur_um, pixel_size_um)
+            raw = apply_halation_um(raw, self.negative.halation, pixel_size_um)
         return raw
 
     def _develop_film(self, log_raw, pixel_size_um):
@@ -290,10 +304,12 @@ class AgXPhoto():
             density_spectral = compute_density_spectral(self.negative, density_cmy)
             print_illuminant = self._compute_print_illuminant(enlarger_light_source)
             light = density_to_light(density_spectral, print_illuminant)
-            raw = contract('ijk, kl->ijl', light, sensitivity)
+            if config.USE_OPENCL_CONTRACT:
+                raw = opencl_parallel_contract('ijk, kl->ijl', light, sensitivity)
+            else:
+                raw = contract('ijk, kl->ijl', light, sensitivity)
             raw *= self.enlarger.print_exposure # adjust print exposure
             raw_midgray_factor = self._compute_exposure_factor_midgray(sensitivity, print_illuminant)
-            # print('raw midgray factor:', raw_midgray_factor)
             raw *= raw_midgray_factor # scale with negative midgray factor
         raw_preflash = self._compute_raw_preflash(enlarger_light_source, sensitivity)
         raw += raw_preflash # add preflash
@@ -319,7 +335,10 @@ class AgXPhoto():
             preflash_illuminant = self._compute_preflash_illuminant(light_source)
             density_base = self.negative.data.dye_density[:, 3][None, None, :]
             light_preflash = density_to_light(density_base, preflash_illuminant)
-            raw_preflash = contract('ijk, kl->ijl', light_preflash, sensitivity)
+            if config.USE_OPENCL_CONTRACT:
+                raw_preflash = opencl_parallel_contract('ijk, kl->ijl', light_preflash, sensitivity)
+            else:
+                raw_preflash = contract('ijk, kl->ijl', light_preflash, sensitivity)
             raw_preflash *= self.enlarger.preflash_exposure
         else:
             raw_preflash = np.zeros((3))
@@ -337,7 +356,10 @@ class AgXPhoto():
         density_cmy_midgray = develop_simple(self.negative, log_raw_midgray)
         density_spectral_midgray = compute_density_spectral(self.negative, density_cmy_midgray)
         light_midgray = density_to_light(density_spectral_midgray, print_illuminant)
-        raw_midgray = contract('ijk, kl->ijl', light_midgray, sensitivity)
+        if config.USE_OPENCL_CONTRACT:
+            raw_midgray = opencl_parallel_contract('ijk, kl->ijl', light_midgray, sensitivity)
+        else:
+            raw_midgray = contract('ijk, kl->ijl', light_midgray, sensitivity)
         factor = 1/raw_midgray[:,:,1]
         return factor
     
@@ -372,14 +394,20 @@ class AgXPhoto():
                 density_cmy = self._denormalize_print_density(density_cmy_n)
             density_spectral = compute_density_spectral(profile, density_cmy)
             light = density_to_light(density_spectral, scan_illuminant)            
-            xyz = contract('ijk,kl->ijl', light, STANDARD_OBSERVER_CMFS[:]) / normalization
+            if config.USE_OPENCL_CONTRACT:
+                xyz = opencl_parallel_contract('ijk,kl->ijl', light, STANDARD_OBSERVER_CMFS[:]) / normalization
+            else:
+                xyz = contract('ijk,kl->ijl', light, STANDARD_OBSERVER_CMFS[:]) / normalization
             log_xyz = np.log10(xyz + 1e-10)
             return log_xyz
         log_xyz = self._spectral_lut_compute(density_cmy_n, spectral_calculation,
                                              use_lut=use_lut)
         xyz = 10**log_xyz
         
-        illuminant_xyz = contract('k,kl->l', scan_illuminant, STANDARD_OBSERVER_CMFS[:]) / normalization
+        if config.USE_OPENCL_CONTRACT:
+            illuminant_xyz = opencl_parallel_contract('k,kl->l', scan_illuminant, STANDARD_OBSERVER_CMFS[:]) / normalization
+        else:
+            illuminant_xyz = contract('k,kl->l', scan_illuminant, STANDARD_OBSERVER_CMFS[:]) / normalization
         xyz = add_glare(xyz, illuminant_xyz, profile)
         illuminant_xy = colour.XYZ_to_xy(illuminant_xyz)
         rgb = colour.XYZ_to_RGB(xyz,
@@ -389,10 +417,16 @@ class AgXPhoto():
         return rgb
     
     def _apply_blur_and_unsharp(self, data):
-        data = apply_gaussian_blur(data, self.scanner.lens_blur)
         unsharp_mask = self.scanner.unsharp_mask
-        if unsharp_mask[0] > 0 and unsharp_mask[1] > 0:
-            data = apply_unsharp_mask(data, sigma=unsharp_mask[0], amount=unsharp_mask[1])
+        if config.USE_OPENCL_BLUR and unsharp_mask[0] > 0 and unsharp_mask[1] > 0:
+            # Pass two sigma values: sigma_pre and sigma_final, then the unsharp amount.
+            data = apply_combined_gaussian_unsharp_gpu(data, self.scanner.lens_blur, unsharp_mask[0], unsharp_mask[1])
+        elif config.USE_OPENCL_BLUR:
+            data = apply_gaussian_blur_gpu(data, self.scanner.lens_blur)
+        else:
+            data = apply_gaussian_blur(data, self.scanner.lens_blur)
+            if unsharp_mask[0] > 0 and unsharp_mask[1] > 0:
+                data = apply_unsharp_mask(data, sigma=unsharp_mask[0], amount=unsharp_mask[1])
         return data
     
     def _apply_cctf_encoding_and_clip(self, rgb):

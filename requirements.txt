@@ -13,3 +13,4 @@ numba~=0.61.0
 OpenImageIO~=3.0.3.1
 pyopencl
 joblib
+siphash24

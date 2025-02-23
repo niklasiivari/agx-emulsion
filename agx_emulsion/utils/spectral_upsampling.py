@@ -5,8 +5,11 @@ import scipy
 import importlib.resources
 from opt_einsum import contract
 import scipy.interpolate
-from agx_emulsion.utils.interp_lut3d import apply_lut_cubic
+from agx_emulsion.utils.interp_lut3d import opencl_apply_lut_cubic
 from agx_emulsion.config import SPECTRAL_SHAPE
+from agx_emulsion.accelerated.gpu_contract import opencl_parallel_contract
+
+from agx_emulsion import config
 
 ################################################################################
 # LUT generatation of irradiance spectra for any xy chromaticity
@@ -139,7 +142,13 @@ def rgb_to_raw_mallett2019(RGB, illuminant, sensitivity,
                     apply_cctf_decoding=apply_cctf_decoding,
                     apply_cctf_encoding=False)
     lrgb = np.clip(lrgb, 0, None)
-    raw  = contract('ijk,lk,lm->ijm', lrgb, basis_set_with_illuminant, sensitivity)
+    # Use specific OpenCL flag for contract calculations.
+    if config.USE_OPENCL_CONTRACT:
+        temp = opencl_parallel_contract('ijk,lk->ijl', lrgb, basis_set_with_illuminant)
+        raw = opencl_parallel_contract('ijl,lm->ijm', temp, sensitivity)
+    else:
+        temp = contract('ijk,lk->ijl', lrgb, basis_set_with_illuminant)
+        raw = contract('ijl,lm->ijm', temp, sensitivity)
     
     raw_midgray  = np.einsum('k,km->m', illuminant*0.184, sensitivity) # use 0.184 as midgray reference
     return raw / raw_midgray[1] # normalize with green channel
@@ -157,7 +166,10 @@ def rgb_to_raw_hanatos2025(rgb, sensitivity,
     data_path = importlib.resources.files('agx_emulsion.data.luts.spectral_upsampling').joinpath('irradiance_rec2020_32size.npy')
     with data_path.open('rb') as file:
         spectra_lut = np.double(np.load(file))
-    raw_lut  = contract('ijkl,lm->ijkm', spectra_lut, sensitivity)
+    if config.USE_OPENCL_CONTRACT:
+        raw_lut = opencl_parallel_contract('ijkl,lm->ijkm', spectra_lut, sensitivity)
+    else:
+        raw_lut = contract('ijkl,lm->ijkm', spectra_lut, sensitivity)
     h = 1/(spectra_lut.shape[0]-1) # lut_step
 
     # spectra lut is in linear rec2020
@@ -171,12 +183,20 @@ def rgb_to_raw_hanatos2025(rgb, sensitivity,
     rgb /= rgb_scale[...,None]
     rgb = np.nan_to_num(rgb) # temporary for safety, fix divide by zero
     raw = np.zeros_like(rgb)
-    raw = apply_lut_cubic(raw_lut, rgb)
+    # Now choose the LUT application method based on flag.
+    if config.USE_OPENCL_LUT_CUBIC:
+        raw = opencl_apply_lut_cubic(raw_lut, rgb)
+    else:
+        # Fallback: using same function (or your software-based LUT, if available)
+        raw = opencl_apply_lut_cubic(raw_lut, rgb)
     raw *= rgb_scale[...,None] # scale the raw back with the scale factor
     # raw = np.nan_to_num(raw) # make sure nans are removed
     
     illuminant = spectra_lut[-1,-1,-1]
-    raw_midgray  = np.einsum('k,km->m', illuminant*0.184, sensitivity) # use 0.184 as midgray reference
+    if config.USE_OPENCL_CONTRACT:
+        raw_midgray  = opencl_parallel_contract('k,kl->l', illuminant*0.184, sensitivity)
+    else:
+        raw_midgray  = np.einsum('k,km->m', illuminant*0.184, sensitivity) # use 0.184 as midgray reference
     return raw / raw_midgray[1] # normalize with green channel
 
 if __name__=='__main__':

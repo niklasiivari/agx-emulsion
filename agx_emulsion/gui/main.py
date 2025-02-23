@@ -17,7 +17,7 @@ from agx_emulsion.profiles.io import load_profile
 from agx_emulsion.profiles.factory import swap_channels
 from agx_emulsion.utils.fast_stats import fast_stats_warmup
 from agx_emulsion.utils.lut3d import warmup_lut3d
-
+from agx_emulsion import config  # import config module to set global flags
 # precompile numba functions
 fast_stats_warmup()
 warmup_lut3d()
@@ -199,9 +199,21 @@ def simulation(input_layer:Image,
             #    compute_film_raw=False,
                compute_negative=False,
                compute_full_image=False,
+               use_opencl=True,  # new toggle for OpenCL
+               use_opencl_contract=True,  # new toggle for OpenCL contraction
+               use_opencl_lut_cubic=True,  # new toggle for OpenCL LUT cubic
+               use_opencl_blur=True,  # new toggle for OpenCL blur
+               use_opencl_resize=True,  # new toggle for OpenCL resample
                )->ImageData:    
-    params = photo_params(film_stock.value, print_paper.value)
     
+    config.USE_OPENCL = use_opencl  # update the global flag
+    config.USE_OPENCL_CONTRACT = use_opencl_contract and use_opencl  # update the global flag
+    config.USE_OPENCL_LUT_CUBIC = use_opencl_lut_cubic and use_opencl  # update the global flag
+    config.USE_OPENCL_BLUR = use_opencl_blur and use_opencl  # update the global flag
+    config.USE_OPENCL_RESIZE = use_opencl_resize and use_opencl  # update the global flag
+
+    params = photo_params(film_stock.value, print_paper.value)
+        
     if special.film_channel_swap.value != (0,1,2):
         params.negative = swap_channels(params.negative, special.film_channel_swap.value)
     if special.print_channel_swap.value != (0,1,2):

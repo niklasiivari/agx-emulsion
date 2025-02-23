@@ -10,6 +10,8 @@ from agx_emulsion.model.density_curves import interpolate_exposure_to_density
 # from agx_emulsion.model.diffusion import apply_unsharp_mask, apply_halation_um
 from agx_emulsion.model.couplers import compute_exposure_correction_dir_couplers, compute_dir_couplers_matrix, compute_density_curves_before_dir_couplers
 from agx_emulsion.model.grain import apply_grain_to_density, apply_grain_to_density_layers
+from agx_emulsion import config
+from agx_emulsion.accelerated.gpu_contract import opencl_parallel_contract
 # from agx_emulsion.model.parametric import parametric_density_curves_model
 
 ################################################################################
@@ -69,7 +71,10 @@ def compute_random_glare_amount(amount, roughness, blur, shape):
     return random_glare
 
 def compute_density_spectral(profile, density_cmy):
-    density_spectral = contract('ijk, lk->ijl', density_cmy, profile.data.dye_density[:, 0:3])
+    if config.USE_OPENCL_CONTRACT:
+        density_spectral = opencl_parallel_contract('ijk, lk->ijl', density_cmy, profile.data.dye_density[:, 0:3])
+    else:
+        density_spectral = contract('ijk, lk->ijl', density_cmy, profile.data.dye_density[:, 0:3])
     density_spectral += profile.data.dye_density[:, 3] * profile.data.tune.dye_density_min_factor
     return density_spectral
 
@@ -112,13 +117,20 @@ class AgXEmulsion():
         return density_cmy
 
     def _compute_density_spectral(self, density_cmy):
-        density_spectral = contract('ijk, lk->ijl', density_cmy, self.dye_density[:, 0:3])
+        if config.USE_OPENCL_CONTRACT:
+            density_spectral = opencl_parallel_contract('ijk, lk->ijl', density_cmy, self.dye_density[:, 0:3])
+        else:
+            density_spectral = contract('ijk, lk->ijl', density_cmy, self.dye_density[:, 0:3])
         density_spectral += self.dye_density[:, 3] * self.dye_density_min_factor
         return density_spectral
     
     def _gaussian_blur(self, data, sigma):
         if sigma > 0:
-            return scipy.ndimage.gaussian_filter(data, (sigma, sigma, 0))
+            if config.USE_OPENCL_BLUR:
+                from agx_emulsion.accelerated.opencl_accelerated import apply_gaussian_blur_gpu
+                return apply_gaussian_blur_gpu(data, sigma)
+            else:
+                return scipy.ndimage.gaussian_filter(data, (sigma, sigma, 0))
         else:
             return data
     

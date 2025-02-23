@@ -9,37 +9,12 @@ import threading
 
 from agx_emulsion.config import SPECTRAL_SHAPE
 from agx_emulsion.utils.io import load_densitometer_data
+from agx_emulsion import config   # Use dynamic config import instead of static flag
+from agx_emulsion.accelerated.opencl_context import get_context, get_queue
+from agx_emulsion.accelerated.opencl_context import _program_cache  # Use global cache
+from agx_emulsion.accelerated.contract_kernel import get_contract_kernel
+from agx_emulsion.accelerated.gpu_contract import opencl_parallel_contract
 
-# Global cache for OpenCL context and program.
-_opencl_lock = threading.Lock()
-_opencl_ctx = None
-_opencl_program = None
-
-def get_opencl_context_and_program(channels):
-    global _opencl_ctx, _opencl_program
-    with _opencl_lock:
-        if _opencl_ctx is None:
-            _opencl_ctx = cl.create_some_context()
-        if _opencl_program is None:
-            kernel_code = """
-            __kernel void contract_kernel(
-                __global const float *a,
-                __global const float *M,
-                __global float *result,
-                const int channels)
-            {
-                int pixel = get_global_id(0);
-                for (int l = 0; l < channels; l++) {
-                    float sum = 0.0f;
-                    for (int k = 0; k < channels; k++) {
-                        sum += a[pixel * channels + k] * M[l * channels + k];
-                    }
-                    result[pixel * channels + l] = sum;
-                }
-            }
-            """
-            _opencl_program = cl.Program(_opencl_ctx, kernel_code).build()
-    return _opencl_ctx, _opencl_program
 
 def density_to_light(density, light):
     """
@@ -87,27 +62,6 @@ def parallel_contract(aces, aces_conversion_matrix):
     )
     return np.concatenate(results, axis=0)
 
-def opencl_parallel_contract(aces, aces_conversion_matrix):
-    """
-    GPU-accelerated contraction using cached OpenCL context.
-    For each pixel, computes: result[i,j,l] = sum_k aces[i,j,k] * aces_conversion_matrix[l,k]
-    """
-    aces = np.array(aces, dtype=np.float32)
-    M = np.array(aces_conversion_matrix, dtype=np.float32)
-    height, width, channels = aces.shape
-    ctx, program = get_opencl_context_and_program(channels)
-    queue = cl.CommandQueue(ctx)
-    mf = cl.mem_flags
-    a_buf = cl.Buffer(ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=aces)
-    M_buf = cl.Buffer(ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=M)
-    result = np.empty((height * width * channels), dtype=np.float32)
-    res_buf = cl.Buffer(ctx, mf.WRITE_ONLY, result.nbytes)
-
-    num_pixels = height * width
-    program.contract_kernel(queue, (num_pixels,), None, a_buf, M_buf, res_buf, np.int32(channels))
-    cl.enqueue_copy(queue, result, res_buf)
-    return result.reshape((height, width, channels))
-
 def rgb_to_raw_aces_idt(RGB, illuminant, sensitivity, midgray_rgb=[[[0.184,0.184,0.184]]],
                         color_space='sRGB', apply_cctf_decoding=True, aces_conversion_matrix=[],
                         use_gpu=True):
@@ -123,8 +77,8 @@ def rgb_to_raw_aces_idt(RGB, illuminant, sensitivity, midgray_rgb=[[[0.184,0.184
             tuple(map(tuple, sensitivity)),
             tuple(illuminant)
         )
-    if use_gpu:
-        raw = opencl_parallel_contract(aces, aces_conversion_matrix) / midgray_rgb
+    if use_gpu and config.USE_OPENCL_CONTRACT:
+        raw = opencl_parallel_contract('ijk,kl->ijl', aces, aces_conversion_matrix) / midgray_rgb
     else:
         raw = parallel_contract(aces, aces_conversion_matrix) / midgray_rgb
     raw_midgray = np.array([[[1,1,1]]])
