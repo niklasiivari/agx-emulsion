@@ -66,9 +66,9 @@ def fetch_coeffs(rgb, lut_coeffs, color_space='ITU-R BT.2020', apply_cctf_decodi
         coeffs[...,i] = scipy.interpolate.RegularGridInterpolator((x,x), lut_coeffs[:,:,i], method='cubic')(tc)
     return coeffs[...,:3], b/coeffs[...,3]
 
-def compute_spectra_from_coeffs(coeffs, b):
+def compute_spectra_from_coeffs(coeffs, b, smooth_steps=1):
     wl = SPECTRAL_SHAPE.wavelengths
-    wl_up = np.arange(360,801) # upsampled wl for finer initial calculation
+    wl_up = np.linspace(360,800,881) # upsampled wl for finer initial calculation 0.5 nm
     x = (coeffs[...,0,None] * wl_up + coeffs[...,1,None])*  wl_up  + coeffs[...,2,None]
     y = 1.0 / np.sqrt(x * x + 1.0)
     spectra = 0.5 * x * y +  0.5
@@ -76,13 +76,13 @@ def compute_spectra_from_coeffs(coeffs, b):
     
     # smooth of half step sigma and downsample
     step = np.mean(np.diff(wl))
-    spectra = scipy.ndimage.gaussian_filter(spectra, step/2, axes=-1)
+    spectra = scipy.ndimage.gaussian_filter(spectra, step*smooth_steps, axes=-1)
     def interp_slice(a, wl, wl_up):
         return np.interp(wl, wl_up, a)
     spectra = np.apply_along_axis(interp_slice, axis=-1, wl=wl, wl_up=wl_up, arr=spectra)
     return spectra
 
-def compute_lut(lut_size=32, color_space='ITU-R BT.2020'):
+def compute_lut(lut_size=32, color_space='ITU-R BT.2020', smooth_steps=0.5):
     lut_coeffs = load_coeffs_lut()
     x = np.linspace(0,1,lut_size)
     r,g,b = np.meshgrid(x,x,x)
@@ -92,7 +92,7 @@ def compute_lut(lut_size=32, color_space='ITU-R BT.2020'):
     coeffs, b = fetch_coeffs(rgb_lut, lut_coeffs, color_space=color_space, apply_cctf_decoding=False)
     coeffs[0,0,0] = [0,0,0]
     b[0,0,0] = 0
-    lut_spectra = compute_spectra_from_coeffs(coeffs, b)
+    lut_spectra = compute_spectra_from_coeffs(coeffs, b, smooth_steps=smooth_steps)
     lut_spectra = np.array(lut_spectra, dtype=np.half)
     return lut_spectra
 
@@ -101,10 +101,23 @@ def compute_lut(lut_size=32, color_space='ITU-R BT.2020'):
 
 def sigmoid_erf(x, center, width=1):
     return scipy.special.erf((x-center)/width)*0.5+0.5
-def compute_band_pass_filter(wl_min=410,   wl_max=675,
-                             width_min=8, width_max=15):
+def compute_band_pass_filter(filter_uv=[1, 410, 8], filter_ir=[1, 675, 15]):
+    amp_uv = filter_uv[0]
+    wl_uv = filter_uv[1]
+    width_uv = filter_uv[2]
+    
+    amp_ir = filter_ir[0]
+    wl_ir = filter_ir[1]
+    width_ir = filter_ir[2]
+    
+    amp_uv = np.clip(amp_uv, 0, 1)
+    amp_ir = np.clip(amp_ir, 0, 1)
+    
     wl = SPECTRAL_SHAPE.wavelengths
-    return sigmoid_erf(wl, wl_min, width=width_min) * sigmoid_erf(wl, wl_max, width=-width_max)
+    filter_uv  = 1-amp_uv + amp_uv*sigmoid_erf(wl, wl_uv, width=width_uv)
+    filter_ir  = 1-amp_ir + amp_ir*sigmoid_erf(wl, wl_ir, width=-width_ir)
+    band_pass_filter = filter_uv * filter_ir
+    return  band_pass_filter
 
 ################################################################################
 # From [Mallett2019]
@@ -112,7 +125,7 @@ def compute_band_pass_filter(wl_min=410,   wl_max=675,
 MALLETT2019_BASIS = colour.recovery.MSDS_BASIS_FUNCTIONS_sRGB_MALLETT2019.copy().align(SPECTRAL_SHAPE)
 def rgb_to_raw_mallett2019(RGB, illuminant, sensitivity,
                            color_space='sRGB', apply_cctf_decoding=True,
-                           apply_band_pass_filter=False):
+                           band_pass_filter=None):
     """
     Converts an RGB color to a raw sensor response using the method described in Mallett et al. (2019).
 
@@ -134,8 +147,7 @@ def rgb_to_raw_mallett2019(RGB, illuminant, sensitivity,
     raw : ndarray
         Raw sensor response.
     """
-    if apply_band_pass_filter:
-        band_pass_filter = compute_band_pass_filter()
+    if band_pass_filter is not None:
         sensitivity *= band_pass_filter[:,None]
     basis_set_with_illuminant = np.array(MALLETT2019_BASIS[:])*np.array(illuminant)[:, None]
     lrgb = colour.RGB_to_RGB(RGB, color_space, 'sRGB',
@@ -158,9 +170,8 @@ def rgb_to_raw_mallett2019(RGB, illuminant, sensitivity,
 
 def rgb_to_raw_hanatos2025(rgb, sensitivity,
                            color_space, apply_cctf_decoding,
-                           apply_band_pass_filter=False):
-    if apply_band_pass_filter:
-        band_pass_filter = compute_band_pass_filter()
+                           band_pass_filter=None):
+    if band_pass_filter is not None:
         sensitivity *= band_pass_filter[:,None]
     # get spectra lut, approx 2 milliseconds
     data_path = importlib.resources.files('agx_emulsion.data.luts.spectral_upsampling').joinpath('irradiance_rec2020_32size.npy')
